@@ -1,0 +1,590 @@
+---
+title: "Concrete Strength Predictive Modeling"
+author: "Jean Ralph M. PAUL"
+abstract: "This study investigates the relationship between concrete composition and compressive strength using several regression models. Eight material components serve as predictors to compare three approaches of increasing complexity: Linear Regression, a Generalized Additive Model (GAM), and a Random Forest. The results indicate that while Linear Regression provides a reasonable baseline, it fails to capture the data's inherent nonlinear patterns. The GAM achieves higher predictive accuracy while remaining interpretable, offering a balanced trade-off between complexity and explainability. Ultimately, the Random Forest model outperforms both alternatives."
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 3
+    toc-expand: true
+    toc-location: left
+    theme: cosmo
+editor: visual
+execute: 
+  echo: false
+  warning: false
+---
+
+## Introduction
+
+Concrete is one of the world's most widely used construction materials, and its strength is critically important as it directly affects the structural integrity and durability of constructions. The reliable prediction of concrete strength has been the focus of numerous studies, which have proposed various techniques including empirical and computational modeling, statistical methods, and artificial intelligence approaches.
+
+The objective of this project is to implement different statistical models cited in the literature and assess their predictive accuracy.
+
+```{r}
+#| echo: false
+#| include: false
+library(tidyverse)
+library(tidymodels)
+library(kableExtra)
+library(corrplot)
+library(GGally)
+library(DataExplorer)
+library(skimr)
+library(readxl)
+library(gridExtra)
+library(grid)
+library(car)
+library(readxl)
+library(leaps)
+library(gtsummary)
+library(glmnet)
+library(mgcv)
+library(ranger)
+library(patchwork)
+library(splines)
+library(broom)
+library(randomForest)
+library(pdp)
+
+#data 
+Concrete_Data <- read_excel("Concrete_Data.xls")
+
+```
+
+## Data set description
+
+The dataset used for this study was obtained from: Yeh, I. (1998). Concrete Compressive Strength \[Dataset\]. UCI Machine Learning Repository. <https://archive.ics.uci.edu/dataset/165/concrete+compressive+strength>
+
+The table below provides a summary of all attributes. As shown, the dataset contains eight quantitative input features and one quantitative output (concrete compressive strength), with no missing values.
+
+```{r}
+#| echo: false
+#| include: false
+#| message: false
+
+data_description <- 
+  skim(Concrete_Data) %>%
+  as.data.frame() %>%
+  select(skim_variable, n_missing, numeric.mean, numeric.sd, numeric.p50) %>%
+  rename(Variable = skim_variable,
+         "Missing Values" = n_missing,
+         Mean = numeric.mean,
+         "Standard Deviation" = numeric.sd,
+         Median = numeric.p50) %>%
+  kbl(align = c("l", "c", "c", "c", "c"),
+      caption = "Descriptive Statistics of Concrete dataset") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE,
+                font_size = 12,
+                position = "center") %>%
+  row_spec(0, bold = TRUE, color = "white", background = "steelblue") %>%
+  column_spec(1, bold = TRUE) 
+  
+```
+
+```{r}
+#| echo: false
+#| message: false
+data_description
+```
+
+\newpage
+
+## Exploratory data analysis
+
+### Outliers detection
+
+Boxplots of the variables revealed that many of the independent variables contain outliers, while the dependent variable (concrete compressive strength) does not. We decided to retain these outliers in the dataset, as they may represent not only measurement errors but also meaningful and valid, albeit rare, cases.
+
+```{r}
+#| echo: false
+#| message: false
+boxplot(Concrete_Data, 
+        col = "#4E84C4",           # Nice blue color
+        border = "#1A476F",        # Darker border
+        main = "Boxplots of Variables",
+        cex.main = 0.8,            # Slightly larger title
+        las = 2,                   # Rotate x-axis labels
+        par(mar = c(7,4,4,2)),     # Adjust bottom margin for labels
+        medcol = "white",          # White median line
+        whisklty = 1,              # Solid whisker lines
+        boxwex = 0.7)              # Slightly wider boxes
+
+```
+
+\newpage
+
+### Pair correlation between attributes
+
+The correlation matrix did not reveal strong pairwise correlations between the variables. However, it is important to note that this result alone does not indicate the absence of multicollinearity.
+
+```{r}
+#| echo: false
+#| message: false
+# 
+cor_matrix <- cor(Concrete_Data[, sapply(Concrete_Data, is.numeric)])
+
+# Corrplot avec options esthétiques
+corrplot(cor_matrix,
+         method = "color",        
+         type = "upper",          
+         order = "hclust",        
+         addCoef.col = "black",   
+         tl.col = "darkblue",     
+         tl.srt = 45,            
+         diag = FALSE,            
+         number.cex = 0.7,        
+         col = colorRampPalette(c("#6D9EC1", "white", "#E46726"))(200),
+         mar = c(1, 1, 1, 1),    
+         title = " ",
+         bg = "white")            
+
+```
+
+\newpage
+
+### Relationship between strength and predictors
+
+Scatter plots reveal clear positive relationships between concrete compressive strength and cement content, superplasticizer content, and age. In contrast, water content shows a negative correlation. The other components exhibit more scattered relationships, suggesting weaker individual effects on strength.
+
+These observed relationships justify the use of regression modeling to quantify how material composition affects concrete compressive strength.
+
+```{r}
+#| echo: false
+#| message: false
+
+#relationship between predictor and dependant var 
+plots <- list()
+
+for (col in names(Concrete_Data)) {
+  if (col != "Concrete_strength") {
+    p <- ggplot(Concrete_Data, aes(x = .data[[col]], y = Concrete_strength)) +
+      geom_point(alpha = 0.6, color = "steelblue") +
+      geom_smooth(method = "lm", color = "#E46726", se = TRUE) +
+      labs(x = col, y = "Concrete_strength") +
+      theme_minimal()
+    plots[[col]] <- p
+  }
+}
+
+# Arrange all plots in a grid
+wrap_plots(plots) + plot_annotation(title = "")
+
+
+
+```
+
+\newpage
+
+## Modeling
+
+### Model Validation Strategy
+
+Before fitting any predictive models, the dataset was randomly divided into a training set and a validation set to ensure a valid assessment of model performance. A 70/30 split was applied, where the training set was used exclusively for model fitting, feature selection, and hyperparameter tuning. The validation set remained completely untouched until the final evaluation stage.
+
+```{r}
+#| echo: false
+#| include: false
+#| message: false
+
+
+#let's now do a single split
+total.n = nrow(Concrete_Data)
+
+#randomly split into training and test
+
+set.seed(1)
+training_v = sample(total.n, round(0.7*total.n), replace = F)
+test_v = setdiff(1:total.n, training_v)
+
+#validation set 
+validation.set = Concrete_Data[test_v,]
+
+#training set
+Concrete_Data = Concrete_Data[training_v,]
+
+```
+
+### Linear regression
+
+Linear regression is one of the most popular and foundational statistical models for predicting concrete compressive strength. Researchers often use multiple linear regression (MLR) to model the relationship between strength and its predictors, frequently accounting for interaction effects.
+
+Our starting point was the full set of candidate variables and key interactions identified in the literature. To improve prediction accuracy and identify the most relevant predictors, we performed best subset selection on this full set. The final model was then fitted using this reduced, optimal subset of variables.
+
+**Best subset selection**
+
+```{r}
+#| echo: false
+#| include: false
+#| message: false
+
+# best subset selection / 
+set.seed(4)
+train<-sample(c(TRUE,FALSE),nrow(Concrete_Data),replace=TRUE)
+test<-!train
+
+model1.best<- regsubsets(Concrete_strength ~ Cement+Blast_Furnace_Slag + Fly_Ash+ 
+                         Water + Superplasticizer + Coarse_Aggregate + 
+                         Fine_Aggregate + Age + Water:Cement + Water:Age +
+                         Fly_Ash:Age, data = Concrete_Data[train,])
+
+test.set <- model.matrix (Concrete_strength ~ Cement+Blast_Furnace_Slag + Fly_Ash+ 
+                         Water + Superplasticizer + Coarse_Aggregate + 
+                         Fine_Aggregate + Age + Water:Cement + Water:Age +
+                         Fly_Ash:Age, data = Concrete_Data[test,])
+ 
+#select a single best model using validation set method
+val.errors<-rep(NA,8)
+
+for(i in 1:8){
+  coefic<-coef(model1.best,id = i)
+  pred<-test.set[,names(coefic)] %*% coefic
+  val.errors[i]<-mean((Concrete_Data$Concrete_strength[test]-pred)^2)
+}
+
+val.errors
+
+min.test.mse<-which.min(val.errors)
+
+
+
+```
+
+Based on the best subset selection algorithm, the combination of features that yields the lowest test error is as follows:
+
+```{r}
+#| echo: false
+#| message: false
+
+selected_features<- names(coef(model1.best,id = min.test.mse))
+feature_type <- ifelse(grepl(":", selected_features), "Interaction", 
+                      ifelse(selected_features == "(Intercept)", "Intercept", "Main Effect"))
+
+feature_df <- data.frame(
+  Predictor = selected_features,
+  Type = feature_type
+)
+
+knitr::kable(feature_df, caption = "Optimal Features Selected by Best Subset Selection")%>%
+  kableExtra::row_spec(0, background = "steelblue", color = "white")
+```
+
+\newpage
+
+**Results of the Fitted Reduced Model**
+
+```{r}
+#| echo: false
+#| message: false
+
+model1_best_subset<-lm(Concrete_strength ~ Cement + Blast_Furnace_Slag + Fly_Ash+ 
+                         Water + Superplasticizer + Coarse_Aggregate + 
+                         Age + Water:Age + Fly_Ash:Age, data = Concrete_Data)
+
+broom::tidy(model1_best_subset) %>% 
+  kableExtra::kbl(digits = 3) %>% 
+  kableExtra::kable_styling()%>%
+  kableExtra::row_spec(0, background = "steelblue", color = "white")
+
+```
+
+**Model diagnostic (reduced linear model)**
+
+This section evaluates the model to determine if it satisfies the assumptions of linear regression.
+
+##### Influential observations (cook's distance analysis)
+
+```{r}
+#| echo: false
+#| message: false
+
+plot(model1_best_subset,which=4)
+```
+
+To detect influential observations, Cook’s distance was used as the primary diagnostic measure. All calculated distances were below conventional thresholds, indicating that no individual observation meaningfully affected the fitted model.
+
+##### Q-Q Plot of Residuals (checking Normality Assumption):
+
+```{r}
+#| echo: false
+#| message: false
+
+fitted<-model1_best_subset$fitted
+residuals<-model1_best_subset$residuals
+data_graphic<-data.frame(fitted,residuals)
+
+#normality of residuals
+ggplot(mapping = aes(sample = residuals))+
+  stat_qq(shape = 21, fill = "steelblue", size = 3, alpha = 0.7) +
+  stat_qq_line(color = "tomato", linewidth = 1) +
+  labs(title = "",
+       #subtitle = "Checking normality assumption",
+       x = "Theoretical Quantiles",
+       y = "Sample Quantiles") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5))
+
+
+
+```
+
+The Q-Q plot shows that the residuals align closely with the theoretical normal distribution, with only minor deviations at the tails. This indicates that the normality assumption is reasonably satisfied.
+
+\newpage
+
+##### Residuals vs. Fitted Values Plot (checking Linearity and homoscedasticity)
+
+```{r}
+#| echo: false
+#| message: false
+
+#residuals vs fitted plot
+ggplot(data_graphic, aes(x = fitted, y = residuals)) +
+  geom_point(color = "steelblue", alpha = 0.7, size = 2) +  # Customize points
+  geom_hline(yintercept = 0, linetype = "dashed", color = "#e74c3c", linewidth = 0.8) +
+  geom_smooth(method = "loess", se = TRUE, color = "black", 
+              fill = "tomato", alpha = 0.3, linewidth = 0.8)+
+  labs(
+    title = "",
+    x = "Fitted Values",
+    y = "Residuals",
+    caption = ""
+  ) +
+  theme_minimal() 
+
+
+```
+
+The residuals versus fitted values plot indicates that the linear model captures the primary trend, as evidenced by the lack of strong systematic curvature. However, a noticeable curved pattern in the smoothed line suggests the model may not fully capture all underlying complexities, such as potential non-linear effects.
+
+Additionally, a slight increase in the spread of residuals at higher fitted values suggests mild heteroscedasticity.
+
+While the linear model provides a reasonable baseline, these findings indicate that exploring more flexible, non-linear algorithms could yield improved predictive performance and better account for the data's structure.
+
+\newpage
+
+### Generalized additive models
+
+Generalized Additive Models (GAMs) provide a framework for extending standard linear models by allowing nonlinear functions of each variable while maintaining additivity.
+
+We fitted a GAM using spline functions for the full set of variables and key interactions identified in the literature.
+
+```{r}
+#| echo: false
+#| message: false
+
+gam1 <- gam(Concrete_strength ~ s(Cement) + s(Blast_Furnace_Slag) + 
+    s(Fly_Ash) + s(Water) + s(Superplasticizer) + s(Coarse_Aggregate) + s(Fine_Aggregate) + 
+    s(Age) + te(Water, Cement) + te(Water, Age) + te(Fly_Ash, Age), data = Concrete_Data)
+  
+broom::tidy(gam1) %>% 
+  kableExtra::kbl(digits = 3) %>% 
+  kableExtra::kable_styling()%>%
+  kableExtra::row_spec(0, background = "steelblue", color = "white")
+
+
+```
+
+The results from the GAM indicate that the relationships between the concrete components and compressive strength are clearly nonlinear. All predictors have effective degrees of freedom greater than 1, confirming strong deviations from linearity. This finding strongly supports the idea that a GAM is more appropriate than linear regression for this data.
+
+\newpage
+
+### Tree-based model
+
+In this section, we fit another class of model: tree-based models, which can help account for the nonlinear and complex relationships between the features and the response.
+
+While decision trees offer a number of advantages, they can be non-robust. Therefore, instead of fitting a single tree, we implemented a Random Forest, which fits multiple decorrelated trees on bootstrapped samples. We first fine-tuned the hyperparameters to maximize performance, then trained the final model on the full training set using the hyperparameters that optimized our cross-validation scores.
+
+```{r}
+#| echo: false
+#| message: false
+#| include: false
+#| eval: false
+
+
+rec <- Concrete_Data |>
+    recipe(Concrete_strength ~ .)
+    
+
+
+## Random Forest model
+model <- rand_forest(
+  mtry = tune("mtry"),
+  trees = tune("n_trees"),
+  min_n = tune("min_n")
+) |>
+  set_engine("ranger") |>
+  set_mode("regression")
+
+wf <- workflow() |>
+    add_recipe(rec) |>
+    add_model(model)
+
+set.seed(3)
+
+folds <- vfold_cv(Concrete_Data, v = 5)
+
+## grid where mtry <= pca_comp + other_features
+safe_grid <- expand.grid(
+  mtry = c(2, 3, 4),
+  n_trees=c(100,500,1000),
+  min_n = c(1, 3, 5,10)
+) 
+
+## Fit model over grid of tuning parameters
+res <- tune_grid(wf, resamples = folds, grid = safe_grid)
+
+#best rmse
+res |>
+  show_best(metric = "rmse")
+  
+#best rsq   
+res |>
+  show_best(metric = "rsq")
+  
+      
+```
+
+```{r}
+#| echo: false
+#| message: false
+set.seed(1)
+
+
+rf <- randomForest(
+  Concrete_strength ~ ., 
+         data = Concrete_Data,
+         importance=TRUE,mtry=4,ntree=1000,nodesize=1
+          
+)
+
+```
+
+```{r}
+#| echo: false
+#| message: false
+
+
+imp<-importance(rf)
+
+# Create the importance plot
+imp_df <- as.data.frame(imp) %>%
+  rownames_to_column("Variable") %>%
+  arrange(desc(`%IncMSE`))
+
+# Create the plot
+ggplot(imp_df, aes(x = reorder(Variable, `%IncMSE`), y = `%IncMSE`)) +
+  geom_segment(aes(xend = Variable, yend = 0), color = "gray50") +
+  geom_point(size = 3, color = "#2E86AB") +
+  coord_flip() +
+  labs(
+    title = "Random Forest Feature Importance",
+    subtitle = "Based on % Increase in MSE",
+    x = "Variables",
+    y = "% Increase in MSE"
+  ) +
+  theme_minimal()
+```
+
+The random forest feature importance indicates that *age* and *cement* are the most dominant predictors of compressive strength. *Slag* and *water* also contribute meaningfully.
+
+\newpage
+
+## Prediction Evaluation
+
+To obtain a valid performance estimate, we assessed our three models using the untouched validation set in two steps:
+
+-   Plotting the predicted versus actual concrete compressive strength for each model.
+
+-   Calculating the following three metrics for each: Mean Squared Error (MSE), Root Mean Squared Error (RMSE), and R-squared.
+
+### Graphical Model Assessment: Predicted vs. Actual Values
+
+```{r}
+#| echo: false
+#| message: false
+
+# Ground truth on the validation/test set
+y_test <- validation.set$Concrete_strength
+
+# Predictions
+pred_lr  <- predict(model1_best_subset, newdata = validation.set)
+pred_gam <- predict(gam1,newdata = validation.set)
+pred_rf  <- predict(rf,newdata = validation.set)  # <- fixed
+
+# Create individual plots
+p1 <- ggplot(data.frame(True = y_test, Pred = pred_lr), 
+             aes(x = True, y = Pred)) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +
+  geom_point(alpha = 0.6, color = "blue") +
+  ggtitle("Linear Regression") +
+  labs(x = "True Value", y = "Predicted Value") +
+  theme_minimal()
+
+p2 <- ggplot(data.frame(True = y_test, Pred = pred_gam), 
+             aes(x = True, y = Pred)) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +
+  geom_point(alpha = 0.6, color = "red") +
+  ggtitle("GAM") +
+  labs(x = "True Value", y = "Predicted Value") +
+  theme_minimal()
+
+p3 <- ggplot(data.frame(True = y_test, Pred = pred_rf), 
+             aes(x = True, y = Pred)) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +
+  geom_point(alpha = 0.6, color = "green") +
+  ggtitle("Random Forest") +
+  labs(x = "True Value", y = "Predicted Value") +
+  theme_minimal()
+
+# Arrange in grid
+(p1 | p2 | p3) + 
+  plot_annotation(title = "")
+
+
+```
+
+The predicted versus actual plot clearly differentiates model performance. The Linear Regression model shows points widely scattered around the diagonal line, indicating underfitting and a limited capacity to capture the underlying data structure. The GAM demonstrates significantly improved performance, with predictions more tightly aligned along the ideal fit line. The Random Forest model delivers the most accurate predictions, exhibiting the smallest dispersion of points around the diagonal, which confirms its superior ability to model the complex relationships in the data.
+
+\newpage
+
+### Predictive Performance Assessment Using MSE, RMSE, and R²
+
+```{r}
+#| echo: false
+#| message: false
+
+
+# Metrics helpers
+mse  <- function(y, yhat) mean((y - yhat)^2)
+rmse <- function(y, yhat) sqrt(mse(y, yhat))
+r2   <- function(y, yhat) 1 - sum((y - yhat)^2) / sum((y - mean(y))^2)  # test-set R²
+
+# Compute metrics
+res <- data.frame(
+  Model = c("Linear Regression", "GAM", "Random Forest"),
+  MSE   = c(mse(y_test, pred_lr),  mse(y_test, pred_gam),  mse(y_test, pred_rf)),
+  RMSE  = c(rmse(y_test, pred_lr), rmse(y_test, pred_gam), rmse(y_test, pred_rf)),
+  R2    = c(r2(y_test, pred_lr),   r2(y_test, pred_gam),   r2(y_test, pred_rf))
+)
+
+kbl(res, digits = 3, 
+    col.names = c("Model", "MSE", "RMSE", "R²"),
+    caption = "") %>%
+  kable_paper(full_width = FALSE) %>%
+  row_spec(0, background = "steelblue", color = "white") %>%
+  column_spec(1, bold = TRUE) 
+```
+
+As the results indicate, the Linear Regression model achieves an MSE of 90.948 and an R-squared of 0.668, representing a reasonable baseline. However, performance improves significantly with more flexible models. The MSE decreases by more than 60 points, and the R-squared shows a substantial improvement from 0.668 for the linear model to 0.890 for the Generalized Additive Model (GAM).
+
+The Random Forest model, with fine-tuned hyperparameters, achieves even better predictive accuracy, reducing the MSE further from 30.18 (GAM) to 27.9. The R-squared values for the GAM and Random Forest, however, are nearly identical.
+
+## Conclusion
+
+In this project, the goal was to evaluate the performance of different models in predicting concrete compressive strength. We experimented with three approaches: Linear Regression, a Generalized Additive Model (GAM), and a Random Forest.
+
+The results show that while Linear Regression provides a reasonable baseline, it fails to capture the true structure and nonlinearity in the data. The GAM achieves a good balance between predictive performance and interpretability, making it a strong middle-ground approach. Finally, the Random Forest, being more flexible and capable of modeling complex relationships, delivers the best overall predictive performance for this problem.
